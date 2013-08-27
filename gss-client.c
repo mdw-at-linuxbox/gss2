@@ -86,7 +86,7 @@ usage()
 #endif
     fprintf(stderr, "\n");
     fprintf(stderr, "       [-f] [-q] [-ccount count] [-mcount count]\n");
-    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] [-seg N] [-gv] [-verbose] host service msg\n");
+    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] [-seg N] [-iov] [-verbose] host service msg\n");
     exit(1);
 }
 
@@ -990,7 +990,7 @@ main(argc, argv)
             auth_flag = wrap_flag = encrypt_flag = mic_flag = 0;
         } else if (strcmp(*argv, "-nw") == 0) {
             wrap_flag = 0;
-        } else if (strcmp(*argv, "-gv") == 0) {
+        } else if (strcmp(*argv, "-iov") == 0) {
             wrap_flag = 2;
         } else if (strcmp(*argv, "-seg") == 0) {
             argc--;
