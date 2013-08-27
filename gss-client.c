@@ -86,7 +86,7 @@ usage()
 #endif
     fprintf(stderr, "\n");
     fprintf(stderr, "       [-f] [-q] [-ccount count] [-mcount count]\n");
-    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] [-gv] [-verbose] host service msg\n");
+    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] [-seg N] [-gv] [-verbose] host service msg\n");
     exit(1);
 }
 
@@ -432,7 +432,7 @@ read_file(file_name, in_buf)
 static int
 call_server(host, port, oid, service_name, gss_flags, auth_flag,
             wrap_flag, encrypt_flag, mic_flag, v1_format, msg, use_file,
-            mcount, username, password)
+            mcount, username, password, segcount)
     char   *host;
     u_short port;
     gss_OID oid;
@@ -445,6 +445,7 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
     int     mcount;
     char    *username;
     char    *password;
+    int	    segcount;
 {
     gss_ctx_id_t context = GSS_C_NO_CONTEXT;
     gss_buffer_desc in_buf, out_buf;
@@ -564,10 +565,10 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
     }
 
     for (i = 0; i < (size_t)mcount; i++) {
-        if (wrap_flag == 2) {
-	    gss_iov_buffer_desc iov[6], *ip;
+        if (wrap_flag > 1) {
+	    gss_iov_buffer_desc iov[256], *ip;
 	    char *buf, *buf2, *p;
-	    int niov, i, s;
+	    int niov, i, z;
 
 	    memset(iov, 0, sizeof iov);
 	    ip = iov;
@@ -583,9 +584,28 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
 		buf2 = in_buf.value;
 	    }
 
-	    ip->buffer.value = buf2;
-	    ip->buffer.length = in_buf.length;
-		++ip;
+	    if (segcount < 2) {
+		ip->buffer.value = buf2;
+		ip->buffer.length = in_buf.length;
+		    ++ip;
+	    } else {
+		int x, t;
+		p = buf2;
+		t = in_buf.length;
+		x = t / segcount;
+		for (i = 0; i < segcount; ++i) {
+		    if (i)
+			ip->type = ip[-1].type;
+		    ip->buffer.value = p;
+		    if (i == (segcount-1))
+			ip->buffer.length = t;
+		    else
+			ip->buffer.length = x;
+		    ++ip;
+		    p += x;
+		    t -= x;
+		}
+	    }
 	    ip->type = GSS_IOV_BUFFER_TYPE_PADDING | GSS_IOV_BUFFER_FLAG_ALLOCATE ;
 		++ip;
 	    ip->type = GSS_IOV_BUFFER_TYPE_TRAILER | GSS_IOV_BUFFER_FLAG_ALLOCATE ;
@@ -622,10 +642,10 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
                 fprintf(stderr, "Warning!  Message not encrypted.\n");
             }
 
-	    s = 0;
+	    z = 0;
 	    for (ip = iov, i = 0; i < niov; ++i, ++ip)
-		s += ip->buffer.length;
-	    buf = malloc(s);
+		z += ip->buffer.length;
+	    buf = malloc(z);
 	    p = buf;
 	    for (ip = iov, i = 0; i < niov; ++i, ++ip) {
 		memcpy(p, ip->buffer.value, ip->buffer.length);
@@ -636,7 +656,7 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
 
 	    memset(&out_buf, 0, sizeof out_buf);
 	    out_buf.value = buf;
-	    out_buf.length = s;
+	    out_buf.length = z;
 
 	    maj_stat = gss_release_iov_buffer(&min_stat, iov, niov);
             if (maj_stat != GSS_S_COMPLETE) {
@@ -867,13 +887,14 @@ static int mcount = 1, ccount = 1;
 static int auth_flag, wrap_flag, encrypt_flag, mic_flag, v1_format;
 static char *username = NULL;
 static char *password = NULL;
+static int segcount = 0;
 
 static void
 worker_bee(void *unused)
 {
     if (call_server(server_host, port, oid, service_name,
                     gss_flags, auth_flag, wrap_flag, encrypt_flag, mic_flag,
-                    v1_format, msg, use_file, mcount, username, password) < 0)
+                    v1_format, msg, use_file, mcount, username, password, segcount) < 0)
         exit(1);
 
 #ifdef _WIN32
@@ -971,6 +992,14 @@ main(argc, argv)
             wrap_flag = 0;
         } else if (strcmp(*argv, "-gv") == 0) {
             wrap_flag = 2;
+        } else if (strcmp(*argv, "-seg") == 0) {
+            argc--;
+            argv++;
+            if (!argc)
+                usage();
+            segcount = atoi(*argv);
+            if (segcount <= 0)
+                usage();
         } else if (strcmp(*argv, "-nx") == 0) {
             encrypt_flag = 0;
         } else if (strcmp(*argv, "-nm") == 0) {
