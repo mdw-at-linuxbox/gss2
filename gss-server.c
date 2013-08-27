@@ -82,6 +82,7 @@ usage()
     fprintf(stderr, "\n");
     fprintf(stderr,
             "       [-inetd] [-export] [-logfile file] [-keytab keytab]\n"
+	    "       [-gv]\n"
             "       service_name\n");
     exit(1);
 }
@@ -397,7 +398,8 @@ test_import_export_context(gss_ctx_id_t *context)
  *                      accept()ed
  *      service_name    (r) the ASCII name of the GSS-API service to
  *                      establish a context as
- *      export          (r) whether to test context exporting
+ *      export          (r) &1 = whether to test context exporting
+ *                          &2 = whether to use gss_unwrap_iov
  *
  * Returns: -1 on error
  *
@@ -423,6 +425,9 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
     char   *cp;
     int     token_flags;
     int     send_flags;
+    gss_iov_buffer_desc iov[6];
+    int	    niov;
+    char	*buf2 = 0;
 
     /* Establish a context with the client */
     if (server_establish_context(s, server_creds, &context,
@@ -436,7 +441,7 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
                (int) client_name.length, (char *) client_name.value);
         (void) gss_release_buffer(&min_stat, &client_name);
 
-        if (export) {
+        if (export & 1) {
             for (i = 0; i < 3; i++)
                 if (test_import_export_context(&context))
                     return -1;
@@ -476,9 +481,60 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
             return (-1);
         }
 
+	memset(iov, 0, sizeof iov);
         if (token_flags & TOKEN_WRAPPED) {
-            maj_stat = gss_unwrap(&min_stat, context, &recv_buf, &unwrap_buf,
-                                  &conf_state, (gss_qop_t *) NULL);
+	    if (export & 2) {
+		gss_iov_buffer_desc *ip, *dataiov;
+		char *buf, *buf2, *p;
+		int i, s;
+
+		ip = iov;
+		ip->type = GSS_IOV_BUFFER_TYPE_HEADER;
+		    ++ip;
+		ip->type = GSS_IOV_BUFFER_TYPE_DATA;
+		/* buf2 will probably be scribbled on */
+		dataiov = ip;
+		    ++ip;
+		ip->type = GSS_IOV_BUFFER_TYPE_PADDING;
+		    ++ip;
+		ip->type = GSS_IOV_BUFFER_TYPE_TRAILER;
+		    ++ip;
+		niov = ip - iov;
+
+		conf_state = (token_flags & TOKEN_ENCRYPTED);
+		maj_stat =
+		    gss_wrap_iov_length(&min_stat, context,
+			!!(token_flags & TOKEN_ENCRYPTED), GSS_C_QOP_DEFAULT,
+			&conf_state, iov, niov);
+		s = recv_buf.length;
+		buf2 = malloc(recv_buf.length);
+		memcpy(buf2, recv_buf.value, recv_buf.length);
+		for (ip = iov, i = 0; i < niov; ++i, ++ip) {
+		    if (ip == dataiov) continue;
+		    s -= ip->buffer.length;
+		}
+		buf2 = malloc(s);
+		dataiov->buffer.length = s;
+		dataiov->buffer.value = buf2;
+		p = recv_buf.value;
+		for (ip = iov, i = 0; i < niov; ++i, ++ip) {
+		    if (ip == dataiov) {
+			memcpy(buf2, p, s);
+		    } else {
+			ip->buffer.value = p;
+		    }
+		    p += ip->buffer.length;
+		}
+		maj_stat = gss_unwrap_iov(&min_stat, context,
+				      &conf_state, (gss_qop_t *) NULL,
+				      iov, niov);
+		unwrap_buf.value = buf2;
+		unwrap_buf.length = s;
+		buf2 = 0;
+	    } else {
+		maj_stat = gss_unwrap(&min_stat, context, &recv_buf, &unwrap_buf,
+				      &conf_state, (gss_qop_t *) NULL);
+	    }
             if (maj_stat != GSS_S_COMPLETE) {
                 display_status("unsealing message", maj_stat, min_stat);
                 if (recv_buf.value) {
@@ -494,6 +550,7 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
                 free(recv_buf.value);
                 recv_buf.value = 0;
             }
+	    if (buf2) free(buf2);
             msg_buf = &unwrap_buf;
         } else {
             unwrap_buf.value = NULL;
@@ -686,7 +743,9 @@ main(int argc, char **argv)
         } else if (strcmp(*argv, "-inetd") == 0) {
             do_inetd = 1;
         } else if (strcmp(*argv, "-export") == 0) {
-            export = 1;
+            export |= 1;
+        } else if (strcmp(*argv, "-gv") == 0) {
+            export |= 2;
         } else if (strcmp(*argv, "-logfile") == 0) {
             argc--;
             argv++;

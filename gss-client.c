@@ -86,7 +86,7 @@ usage()
 #endif
     fprintf(stderr, "\n");
     fprintf(stderr, "       [-f] [-q] [-ccount count] [-mcount count]\n");
-    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] host service msg\n");
+    fprintf(stderr, "       [-v1] [-na] [-nw] [-nx] [-nm] [-gv] [-verbose] host service msg\n");
     exit(1);
 }
 
@@ -564,7 +564,86 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
     }
 
     for (i = 0; i < (size_t)mcount; i++) {
-        if (wrap_flag) {
+        if (wrap_flag == 2) {
+	    gss_iov_buffer_desc iov[6], *ip;
+	    char *buf, *buf2, *p;
+	    int niov, i, s;
+
+	    memset(iov, 0, sizeof iov);
+	    ip = iov;
+	    ip->type = GSS_IOV_BUFFER_TYPE_HEADER | GSS_IOV_BUFFER_FLAG_ALLOCATE ;
+		++ip;
+	    if (encrypt_flag) {
+		ip->type = GSS_IOV_BUFFER_TYPE_DATA;
+		/* buf2 will be scribbled on */
+		buf2 = malloc(in_buf.length);
+		memcpy(buf2, in_buf.value, in_buf.length);
+	    } else {
+		ip->type = GSS_IOV_BUFFER_TYPE_SIGN_ONLY;
+		buf2 = in_buf.value;
+	    }
+
+	    ip->buffer.value = buf2;
+	    ip->buffer.length = in_buf.length;
+		++ip;
+	    ip->type = GSS_IOV_BUFFER_TYPE_PADDING | GSS_IOV_BUFFER_FLAG_ALLOCATE ;
+		++ip;
+	    ip->type = GSS_IOV_BUFFER_TYPE_TRAILER | GSS_IOV_BUFFER_FLAG_ALLOCATE ;
+		++ip;
+	    niov = ip - iov;
+
+            maj_stat =
+                gss_wrap_iov_length(&min_stat, context, encrypt_flag, GSS_C_QOP_DEFAULT,
+                        &state, iov, niov);
+            if (maj_stat != GSS_S_COMPLETE) {
+                display_status("wrapping message", maj_stat, min_stat);
+                (void) closesocket(s);
+                (void) gss_delete_sec_context(&min_stat, &context,
+                                              GSS_C_NO_BUFFER);
+                return -1;
+	    }
+	    if (verbose > 1) {
+		int j;
+		for (j = 0; j < (ip-iov); ++j) {
+		    printf ("%d: %#lx %d\n", j,
+			(long)iov[j].buffer.value, iov[j].buffer.length);
+		}
+	    }
+            maj_stat =
+                gss_wrap_iov(&min_stat, context, encrypt_flag, GSS_C_QOP_DEFAULT,
+                        &state, iov, niov);
+            if (maj_stat != GSS_S_COMPLETE) {
+                display_status("wrapping message", maj_stat, min_stat);
+                (void) closesocket(s);
+                (void) gss_delete_sec_context(&min_stat, &context,
+                                              GSS_C_NO_BUFFER);
+                return -1;
+            } else if (encrypt_flag && !state) {
+                fprintf(stderr, "Warning!  Message not encrypted.\n");
+            }
+
+	    s = 0;
+	    for (ip = iov, i = 0; i < niov; ++i, ++ip)
+		s += ip->buffer.length;
+	    buf = malloc(s);
+	    p = buf;
+	    for (ip = iov, i = 0; i < niov; ++i, ++ip) {
+		memcpy(p, ip->buffer.value, ip->buffer.length);
+		p += ip->buffer.length;
+	    }
+	    if (buf2 != in_buf.value)
+		free(buf2);
+
+	    memset(&out_buf, 0, sizeof out_buf);
+	    out_buf.value = buf;
+	    out_buf.length = s;
+
+	    maj_stat = gss_release_iov_buffer(&min_stat, iov, niov);
+            if (maj_stat != GSS_S_COMPLETE) {
+                display_status("releasing iov buffers", maj_stat, min_stat);
+	    }
+
+        } else if (wrap_flag) {
             maj_stat =
                 gss_wrap(&min_stat, context, encrypt_flag, GSS_C_QOP_DEFAULT,
                          &in_buf, &state, &out_buf);
@@ -580,6 +659,17 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
         } else {
             out_buf = in_buf;
         }
+	if (verbose > 1) {
+	    printf ("s %d/", out_buf.length);
+	    {
+		int j;
+		for (j = 0; j < out_buf.length; ++j) {
+		    if (!(j & 15) && j) printf ("\ns    ");
+		    printf (" %02x", j[(unsigned char *)out_buf.value]);
+		}
+	    }
+	    printf ("\n");
+	}
 
         /* Send to server */
         if (send_token(s, (v1_format ? 0
@@ -603,6 +693,26 @@ call_server(host, port, oid, service_name, gss_flags, auth_flag,
                                           GSS_C_NO_BUFFER);
             return -1;
         }
+	if (verbose > 1) {
+	    printf ("j%3d/", in_buf.length);
+	    {
+		int j;
+		for (j = 0; j < in_buf.length; ++j) {
+		    if (!(j & 15) && j) printf ("\ni    ");
+		    printf (" %02x", j[(unsigned char *)in_buf.value]);
+		}
+	    }
+	    printf ("\n");
+	    printf ("o%3d/", out_buf.length);
+	    {
+		int j;
+		for (j = 0; j < out_buf.length; ++j) {
+		    if (!(j & 15) && j) printf ("\no    ");
+		    printf (" %02x", j[(unsigned char *)out_buf.value]);
+		}
+	    }
+	    printf ("\n");
+	}
 
         if (mic_flag) {
             /* Verify signature block */
@@ -859,12 +969,16 @@ main(argc, argv)
             auth_flag = wrap_flag = encrypt_flag = mic_flag = 0;
         } else if (strcmp(*argv, "-nw") == 0) {
             wrap_flag = 0;
+        } else if (strcmp(*argv, "-gv") == 0) {
+            wrap_flag = 2;
         } else if (strcmp(*argv, "-nx") == 0) {
             encrypt_flag = 0;
         } else if (strcmp(*argv, "-nm") == 0) {
             mic_flag = 0;
         } else if (strcmp(*argv, "-v1") == 0) {
             v1_format = 1;
+        } else if (strcmp(*argv, "-verbose") == 0) {
+            verbose = 2;
         } else
             break;
         argc--;
