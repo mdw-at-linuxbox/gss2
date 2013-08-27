@@ -82,7 +82,7 @@ usage()
     fprintf(stderr, "\n");
     fprintf(stderr,
             "       [-inetd] [-export] [-logfile file] [-keytab keytab]\n"
-	    "       [-gv]\n"
+	    "       [-iov] [-seg N]\n"
             "       service_name\n");
     exit(1);
 }
@@ -400,6 +400,7 @@ test_import_export_context(gss_ctx_id_t *context)
  *                      establish a context as
  *      export          (r) &1 = whether to test context exporting
  *                          &2 = whether to use gss_unwrap_iov
+ *      segcount        (r) if using gss_unwrap_iov # segments to use.
  *
  * Returns: -1 on error
  *
@@ -415,7 +416,7 @@ test_import_export_context(gss_ctx_id_t *context)
  * If any error occurs, -1 is returned.
  */
 static int
-sign_server(int s, gss_cred_id_t server_creds, int export)
+sign_server(int s, gss_cred_id_t server_creds, int export, int segcount)
 {
     gss_buffer_desc client_name, recv_buf, unwrap_buf, mic_buf, *msg_buf, *send_buf;
     gss_ctx_id_t context;
@@ -425,7 +426,7 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
     char   *cp;
     int     token_flags;
     int     send_flags;
-    gss_iov_buffer_desc iov[6];
+    gss_iov_buffer_desc iov[256];
     int	    niov;
     char	*buf2 = 0;
 
@@ -484,22 +485,29 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
 	memset(iov, 0, sizeof iov);
         if (token_flags & TOKEN_WRAPPED) {
 	    if (export & 2) {
-		gss_iov_buffer_desc *ip, *dataiov;
-		char *buf, *buf2, *p;
-		int i, s;
+		gss_iov_buffer_desc *ip;
+		char *buf, *buf2, *p, *q;
+		int i, s, x, t;
 
 		ip = iov;
 		ip->type = GSS_IOV_BUFFER_TYPE_HEADER;
 		    ++ip;
-		ip->type = GSS_IOV_BUFFER_TYPE_DATA;
-		/* buf2 will probably be scribbled on */
-		dataiov = ip;
-		    ++ip;
+		for (i = 0; i < segcount; ++i) {
+		    ip->type = GSS_IOV_BUFFER_TYPE_DATA;
+			++ip;
+		}
 		ip->type = GSS_IOV_BUFFER_TYPE_PADDING;
 		    ++ip;
 		ip->type = GSS_IOV_BUFFER_TYPE_TRAILER;
 		    ++ip;
 		niov = ip - iov;
+	    if (verbose) {
+		int j;
+		for (j = 0; j < (ip-iov); ++j) {
+		    printf ("%d: %d %#lx %d\n", j, iov[j].type,
+			(long)iov[j].buffer.value, iov[j].buffer.length);
+		}
+	    }
 
 		conf_state = (token_flags & TOKEN_ENCRYPTED);
 		maj_stat =
@@ -507,19 +515,28 @@ sign_server(int s, gss_cred_id_t server_creds, int export)
 			!!(token_flags & TOKEN_ENCRYPTED), GSS_C_QOP_DEFAULT,
 			&conf_state, iov, niov);
 		s = recv_buf.length;
+		    /* buf2 will probably be scribbled on */
 		buf2 = malloc(recv_buf.length);
 		memcpy(buf2, recv_buf.value, recv_buf.length);
 		for (ip = iov, i = 0; i < niov; ++i, ++ip) {
-		    if (ip == dataiov) continue;
+		    if (ip->type == GSS_IOV_BUFFER_TYPE_DATA)
+			continue;
 		    s -= ip->buffer.length;
 		}
 		buf2 = malloc(s);
-		dataiov->buffer.length = s;
-		dataiov->buffer.value = buf2;
+		q = buf2;
 		p = recv_buf.value;
+		x = s / segcount;
+		if (s % segcount) ++x;
+		t = s;
 		for (ip = iov, i = 0; i < niov; ++i, ++ip) {
-		    if (ip == dataiov) {
-			memcpy(buf2, p, s);
+		    if (ip->type == GSS_IOV_BUFFER_TYPE_DATA) {
+			if (x > t) x = t;
+			memcpy(q, p, x);
+			ip->buffer.value = q;
+			ip->buffer.length = x;
+			q += x;
+			t -= x;
 		    } else {
 			ip->buffer.value = p;
 		    }
@@ -684,6 +701,7 @@ struct _work_plan
     int     s;
     gss_cred_id_t server_creds;
     int     export;
+    int	    segcount;
 };
 
 static void
@@ -694,7 +712,7 @@ worker_bee(void *param)
     /* this return value is not checked, because there's
      * not really anything to do if it fails
      */
-    sign_server(work->s, work->server_creds, work->export);
+    sign_server(work->s, work->server_creds, work->export, work->segcount);
     closesocket(work->s);
     free(work);
 
@@ -714,6 +732,7 @@ main(int argc, char **argv)
     int     once = 0;
     int     do_inetd = 0;
     int     export = 0;
+    int	    segcount = 1;
 
     logfile = stdout;
     display_file = stdout;
@@ -744,8 +763,14 @@ main(int argc, char **argv)
             do_inetd = 1;
         } else if (strcmp(*argv, "-export") == 0) {
             export |= 1;
-        } else if (strcmp(*argv, "-gv") == 0) {
+        } else if (strcmp(*argv, "-iov") == 0) {
             export |= 2;
+        } else if (strcmp(*argv, "-seg") == 0) {
+            argc--;
+            argv++;
+            if (!argc)
+                usage();
+            segcount = atoi(*argv);
         } else if (strcmp(*argv, "-logfile") == 0) {
             argc--;
             argv++;
@@ -807,7 +832,7 @@ main(int argc, char **argv)
         close(1);
         close(2);
 
-        sign_server(0, server_creds, export);
+        sign_server(0, server_creds, export, segcount);
         close(0);
     } else {
         int     stmp;
@@ -833,6 +858,7 @@ main(int argc, char **argv)
 
                 work->server_creds = server_creds;
                 work->export = export;
+                work->segcount = segcount;
 
                 if (max_threads == 1) {
                     worker_bee((void *) work);
