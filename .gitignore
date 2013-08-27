@@ -1,0 +1,4 @@
+*.keytab
+gss-server
+gss-client
+*.o
